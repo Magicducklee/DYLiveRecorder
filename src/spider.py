@@ -14,16 +14,27 @@ import random
 import subprocess
 import time
 import uuid
+import tempfile
+import os
+import sys
 from operator import itemgetter
 import urllib.parse
 import urllib.error
-from typing import List
+from typing import List, Optional, Dict
 import httpx
 import ssl
 import re
 import json
 import execjs
 import urllib.request
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from webdriver_manager.chrome import ChromeDriverManager
 from . import JS_SCRIPT_PATH, utils
 from .utils import trace_error_decorator, generate_random_string
 from .logger import script_path
@@ -66,6 +77,7 @@ async def get_play_url_list(m3u8: str, proxy: OptionalStr = None, header: Option
 
 
 async def get_douyin_web_stream_data(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None):
+    # 设置headers（保持与原代码一致）
     headers = {
         'cookie': 'ttwid=1%7C2iDIYVmjzMcpZ20fcaFde0VghXAA3NaNXE_SLR68IyE%7C1761045455'
                   '%7Cab35197d5cfb21df6cbb2fa7ef1c9262206b062c315b9d04da746d0b37dfbc7d',
@@ -77,64 +89,80 @@ async def get_douyin_web_stream_data(url: str, proxy_addr: OptionalStr = None, c
         headers['cookie'] = cookies
 
     try:
-        web_rid = url.split('?')[0].split('live.douyin.com/')[-1]
-        params = {
-            "aid": "6383",
-            "app_name": "douyin_web",
-            "live_id": "1",
-            "device_platform": "web",
-            "language": "zh-CN",
-            "browser_language": "zh-CN",
-            "browser_platform": "Win32",
-            "browser_name": "Chrome",
-            "browser_version": "116.0.0.0",
-            "web_rid": web_rid,
-            'msToken': '',
-        }
-
-        api = f'https://live.douyin.com/webcast/room/web/enter/?{urllib.parse.urlencode(params)}'
-        a_bogus = ab_sign(urllib.parse.urlparse(api).query, headers['user-agent'])
-        api += "&a_bogus=" + a_bogus
+        # 使用Selenium获取页面HTML源码
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        import time
+        
+        # 配置Chrome选项
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument(f'--user-agent={headers["user-agent"]}')
+        
+        # 设置代理（如果有）
+        if proxy_addr:
+            chrome_options.add_argument(f'--proxy-server={proxy_addr}')
+        
+        # 启动浏览器
+        driver = webdriver.Chrome(options=chrome_options)
+        
         try:
-            json_str = await async_req(url=api, proxy_addr=proxy_addr, headers=headers)
-            if not json_str:
-                raise Exception("it triggered risk control")
-            json_data = json.loads(json_str)['data']
-            if not json_data['data']:
-                raise Exception(f"{url} VR live is not supported")
-            room_data = json_data['data'][0]
-            room_data['anchor_name'] = json_data['user']['nickname']
-        except Exception as e:
-            raise Exception(f"Douyin web data fetch error, because {e}.")
+            # 访问URL
+            driver.get(url)
+            time.sleep(5)  # 等待页面加载
+            
+            # 添加Cookie（如果有）
+            if cookies:
+                cookie_list = cookies.split(';')
+                for cookie in cookie_list:
+                    if '=' in cookie:
+                        name, value = cookie.strip().split('=', 1)
+                        driver.add_cookie({'name': name, 'value': value})
+                driver.refresh()
+                time.sleep(3)
+            
+            # 获取页面源码
+            html_content = driver.page_source
+            
+        finally:
+            driver.quit()
 
-        if room_data['status'] == 2:
-            if 'stream_url' not in room_data:
-                raise RuntimeError(
-                    "The live streaming type or gameplay is not supported on the computer side yet, please use the "
-                    "app to share the link for recording."
-                )
-            live_core_sdk_data = room_data['stream_url']['live_core_sdk_data']
-            pull_datas = room_data['stream_url']['pull_datas']
-            if live_core_sdk_data:
-                if pull_datas:
-                    key = list(pull_datas.keys())[0]
-                    json_str = pull_datas[key]['stream_data']
-                else:
-                    json_str = live_core_sdk_data['pull_data']['stream_data']
-                json_data = json.loads(json_str)
-                if 'origin' in json_data['data']:
-                    stream_data = live_core_sdk_data['pull_data']['stream_data']
-                    origin_data = json.loads(stream_data)['data']['origin']['main']
-                    sdk_params = json.loads(origin_data['sdk_params'])
-                    origin_hls_codec = sdk_params.get('VCodec') or ''
+        # 从HTML中提取直播间ID
+        web_rid = url.split('?')[0].split('live.douyin.com/')[-1]
+        
+        # 原有的API调用逻辑改为从HTML解析
+        # 使用正则表达式从HTML中提取直播流数据
+        import re
+        import json
+        
+        # 查找包含直播流信息的JSON数据
+        pattern = r'"stream_url"\s*:\s*(\{.*?\})\s*,\s*"'
+        match = re.search(pattern, html_content, re.DOTALL)
+        
+        if not match:
+            raise Exception("无法从HTML中提取直播流数据")
+        
+        stream_data_str = match.group(1)
+        stream_data = json.loads(stream_data_str)
+        
+        # 构建返回数据（保持与原结构一致）
+        room_data = {
+            'anchor_name': '',
+            'status': 2,  # 假设直播中
+            'stream_url': stream_data
+        }
+        
+        # 尝试从HTML中提取主播名
+        anchor_pattern = r'"nickname"\s*:\s*"([^"]+)"'
+        anchor_match = re.search(anchor_pattern, html_content)
+        if anchor_match:
+            room_data['anchor_name'] = anchor_match.group(1)
+        
+        return room_data
 
-                    origin_url_list = json_data['data']['origin']['main']
-                    origin_m3u8 = {'ORIGIN': origin_url_list["hls"] + '&codec=' + origin_hls_codec}
-                    origin_flv = {'ORIGIN': origin_url_list["flv"] + '&codec=' + origin_hls_codec}
-                    hls_pull_url_map = room_data['stream_url']['hls_pull_url_map']
-                    flv_pull_url = room_data['stream_url']['flv_pull_url']
-                    room_data['stream_url']['hls_pull_url_map'] = {**origin_m3u8, **hls_pull_url_map}
-                    room_data['stream_url']['flv_pull_url'] = {**origin_flv, **flv_pull_url}
     except Exception as e:
         print(f"Error message: {e} Error line: {e.__traceback__.tb_lineno}")
         room_data = {'anchor_name': ""}
@@ -143,6 +171,7 @@ async def get_douyin_web_stream_data(url: str, proxy_addr: OptionalStr = None, c
 
 @trace_error_decorator
 async def get_douyin_app_stream_data(url: str, proxy_addr: OptionalStr = None, cookies: OptionalStr = None) -> dict:
+    # 设置headers（保持与原代码一致）
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
                       'Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0',
@@ -153,73 +182,79 @@ async def get_douyin_app_stream_data(url: str, proxy_addr: OptionalStr = None, c
     if cookies:
         headers['Cookie'] = cookies
 
-    async def get_app_data(room_id: str, sec_uid: str) -> dict:
-        app_params = {
-            "verifyFp": "verify_hwj52020_7szNlAB7_pxNY_48Vh_ALKF_GA1Uf3yteoOY",
-            "type_id": "0",
-            "live_id": "1",
-            "room_id": room_id,
-            "sec_user_id": sec_uid,
-            "version_code": "99.99.99",
-            "app_id": "1128"
-        }
-        api2 = f'https://webcast.amemv.com/webcast/room/reflow/info/?{urllib.parse.urlencode(app_params)}'
-        a_bogus = ab_sign(urllib.parse.urlparse(api2).query, headers['User-Agent'])
-        api2 += "&a_bogus=" + a_bogus
-        try:
-            json_str2 = await async_req(url=api2, proxy_addr=proxy_addr, headers=headers)
-            if not json_str2:
-                raise Exception("it triggered risk control")
-            json_data2 = json.loads(json_str2)['data']
-            if not json_data2.get('room'):
-                raise Exception(f"{url} VR live is not supported")
-            room_data2 = json_data2['room']
-            room_data2['anchor_name'] = room_data2['owner']['nickname']
-            return room_data2
-        except Exception as e:
-            raise Exception(f"Douyin app data fetch error, because {e}.")
-
     try:
-        web_rid = url.split('?')[0].split('live.douyin.com/')
-        if len(web_rid) > 1:
-            return await get_douyin_web_stream_data(url, proxy_addr, cookies)
+        # 使用Selenium获取页面HTML源码（模拟移动端）
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        import time
+        
+        # 配置Chrome选项（模拟移动端）
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        
+        # 设置移动端User-Agent
+        mobile_user_agent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'
+        chrome_options.add_argument(f'--user-agent={mobile_user_agent}')
+        
+        # 设置窗口大小为手机尺寸
+        chrome_options.add_argument('--window-size=375,812')
+        
+        # 设置代理（如果有）
+        if proxy_addr:
+            chrome_options.add_argument(f'--proxy-server={proxy_addr}')
+        
+        # 启动浏览器
+        driver = webdriver.Chrome(options=chrome_options)
+        
+        try:
+            # 访问URL
+            driver.get(url)
+            time.sleep(5)  # 等待页面加载
+            
+            # 添加Cookie（如果有）
+            if cookies:
+                cookie_list = cookies.split(';')
+                for cookie in cookie_list:
+                    if '=' in cookie:
+                        name, value = cookie.strip().split('=', 1)
+                        driver.add_cookie({'name': name, 'value': value})
+                driver.refresh()
+                time.sleep(3)
+            
+            # 获取页面源码
+            html_content = driver.page_source
+            
+        finally:
+            driver.quit()
+
+        # 从HTML中提取直播间信息
+        import re
+        import json
+        
+        # 查找包含直播间信息的JSON数据
+        room_pattern = r'"room"\s*:\s*(\{.*?\})\s*,\s*"'
+        room_match = re.search(room_pattern, html_content, re.DOTALL)
+        
+        if not room_match:
+            # 尝试其他可能的数据结构
+            room_pattern = r'"roomInfo"\s*:\s*(\{.*?\})\s*,\s*"'
+            room_match = re.search(room_pattern, html_content, re.DOTALL)
+        
+        if room_match:
+            room_data_str = room_match.group(1)
+            room_data = json.loads(room_data_str)
+            
+            # 确保数据结构一致
+            if 'owner' in room_data and 'nickname' in room_data['owner']:
+                room_data['anchor_name'] = room_data['owner']['nickname']
+            
+            return room_data
         else:
-            try:
-                data = await get_sec_user_id(url, proxy_addr=proxy_addr)
-                _room_id, _sec_uid = data
-                room_data = await get_app_data(_room_id, _sec_uid)
-            except UnsupportedUrlError:
-                unique_id = await get_unique_id(url, proxy_addr=proxy_addr)
-                return await get_douyin_stream_data(f'https://live.douyin.com/{unique_id}')
+            raise Exception("无法从HTML中提取直播间数据")
 
-        if room_data['status'] == 2:
-            if 'stream_url' not in room_data:
-                raise RuntimeError(
-                    "The live streaming type or gameplay is not supported on the computer side yet, please use the "
-                    "app to share the link for recording."
-                )
-            live_core_sdk_data = room_data['stream_url']['live_core_sdk_data']
-            pull_datas = room_data['stream_url']['pull_datas']
-            if live_core_sdk_data:
-                if pull_datas:
-                    key = list(pull_datas.keys())[0]
-                    json_str = pull_datas[key]['stream_data']
-                else:
-                    json_str = live_core_sdk_data['pull_data']['stream_data']
-                json_data = json.loads(json_str)
-                if 'origin' in json_data['data']:
-                    stream_data = live_core_sdk_data['pull_data']['stream_data']
-                    origin_data = json.loads(stream_data)['data']['origin']['main']
-                    sdk_params = json.loads(origin_data['sdk_params'])
-                    origin_hls_codec = sdk_params.get('VCodec') or ''
-
-                    origin_url_list = json_data['data']['origin']['main']
-                    origin_m3u8 = {'ORIGIN': origin_url_list["hls"] + '&codec=' + origin_hls_codec}
-                    origin_flv = {'ORIGIN': origin_url_list["flv"] + '&codec=' + origin_hls_codec}
-                    hls_pull_url_map = room_data['stream_url']['hls_pull_url_map']
-                    flv_pull_url = room_data['stream_url']['flv_pull_url']
-                    room_data['stream_url']['hls_pull_url_map'] = {**origin_m3u8, **hls_pull_url_map}
-                    room_data['stream_url']['flv_pull_url'] = {**origin_flv, **flv_pull_url}
     except Exception as e:
         print(f"Error message: {e} Error line: {e.__traceback__.tb_lineno}")
         room_data = {'anchor_name': ""}
@@ -239,10 +274,57 @@ async def get_douyin_stream_data(url: str, proxy_addr: OptionalStr = None, cooki
 
     try:
         origin_url_list = None
-        html_str = await async_req(url=url, proxy_addr=proxy_addr, headers=headers)
+        
+        # 使用Selenium获取页面HTML源码
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        import time
+        
+        # 配置Chrome选项
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        
+        # 设置代理（如果有）
+        if proxy_addr:
+            chrome_options.add_argument(f'--proxy-server={proxy_addr}')
+        
+        # 设置User-Agent
+        chrome_options.add_argument(f'--user-agent={headers["User-Agent"]}')
+        
+        # 启动浏览器
+        driver = webdriver.Chrome(options=chrome_options)
+        
+        try:
+            # 访问URL
+            driver.get(url)
+            time.sleep(5)  # 等待页面加载
+            
+            # 添加Cookie（如果有）
+            if cookies:
+                cookie_list = cookies.split(';')
+                for cookie in cookie_list:
+                    if '=' in cookie:
+                        name, value = cookie.strip().split('=', 1)
+                        driver.add_cookie({'name': name, 'value': value})
+                driver.refresh()  # 刷新页面应用Cookie
+                time.sleep(3)
+            
+            # 获取页面源码
+            html_str = driver.page_source
+            
+        finally:
+            driver.quit()
+
+        # 原有的解析逻辑保持不变
         match_json_str = re.search(r'(\{\\"state\\":.*?)]\\n"]\)', html_str)
         if not match_json_str:
             match_json_str = re.search(r'(\{\\"common\\":.*?)]\\n"]\)</script><div hidden', html_str)
+        if not match_json_str:
+            raise Exception("无法从HTML中提取JSON数据")
+            
         json_str = match_json_str.group(1)
         cleaned_string = json_str.replace('\\', '').replace(r'u0026', r'&')
         room_store = re.search('"roomStore":(.*?),"linkmicStore"', cleaned_string, re.DOTALL).group(1)
@@ -250,17 +332,19 @@ async def get_douyin_stream_data(url: str, proxy_addr: OptionalStr = None, cooki
         room_store = room_store.split(',"has_commerce_goods"')[0] + '}}}'
         json_data = json.loads(room_store)['roomInfo']['room']
         json_data['anchor_name'] = anchor_name
+        
         if 'status' in json_data and json_data['status'] == 4:
             return json_data
+            
         stream_orientation = json_data['stream_url']['stream_orientation']
         match_json_str2 = re.findall(r'"(\{\\"common\\":.*?)"]\)</script><script nonce=', html_str)
+        
         if match_json_str2:
             json_str = match_json_str2[0] if stream_orientation == 1 else match_json_str2[1]
             json_data2 = json.loads(
                 json_str.replace('\\', '').replace('"{', '{').replace('}"', '}').replace('u0026', '&'))
             if 'origin' in json_data2['data']:
                 origin_url_list = json_data2['data']['origin']['main']
-
         else:
             html_str = html_str.replace('\\', '').replace('u0026', '&')
             match_json_str3 = re.search('"origin":\\{"main":(.*?),"dash"', html_str, re.DOTALL)
@@ -275,6 +359,7 @@ async def get_douyin_stream_data(url: str, proxy_addr: OptionalStr = None, cooki
             flv_pull_url = json_data['stream_url']['flv_pull_url']
             json_data['stream_url']['hls_pull_url_map'] = {**origin_m3u8, **hls_pull_url_map}
             json_data['stream_url']['flv_pull_url'] = {**origin_flv, **flv_pull_url}
+            
         return json_data
 
     except Exception as e:
