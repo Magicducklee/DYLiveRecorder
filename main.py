@@ -9,6 +9,7 @@ Copyright (c) 2023-2025 by Hmily, All Rights Reserved.
 Function: Record live stream video.
 """
 import asyncio
+import logging
 import os
 import sys
 import builtins
@@ -27,6 +28,9 @@ from urllib.error import URLError, HTTPError
 from typing import Any
 import configparser
 import httpx
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
 from src import spider, stream
 from src.proxy import ProxyDetector
 from src.utils import logger
@@ -37,6 +41,8 @@ from msg_push import (
 from ffmpeg_install import (
     check_ffmpeg, ffmpeg_path, current_env_path
 )
+# （可选）降低webdriver-manager的日志级别，避免输出过多信息
+os.environ['WDM_LOG'] = str(logging.NOTSET)
 
 version = "v4.0.7"
 platforms = ("\n国内站点：抖音|快手|虎牙|斗鱼|YY|B站|小红书|bigo|blued|网易CC|千度热播|猫耳FM|Look|TwitCasting|百度|微博|"
@@ -79,6 +85,12 @@ clear_command = "cls" if os_type == 'nt' else "clear"
 color_obj = utils.Color()
 os.environ['PATH'] = ffmpeg_path + os.pathsep + current_env_path
 
+
+def 创建浏览器驱动():
+    """创建并返回一个配置好的Chrome浏览器驱动对象，自动处理驱动版本匹配"""
+    # 自动下载匹配的ChromeDriver并获取其路径，然后创建浏览器实例
+    driver =  webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()))
+    return driver
 
 def signal_handler(_signal, _frame):
     sys.exit(0)
