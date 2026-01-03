@@ -112,41 +112,140 @@ async def get_douyin_web_stream_data(url: str, proxy_addr: OptionalStr = None, c
         try:
             # 访问URL
             driver.get(url)
-            time.sleep(5)  # 等待页面加载
-            
-            # 添加Cookie（如果有）
-            if cookies:
-                cookie_list = cookies.split(';')
-                for cookie in cookie_list:
-                    if '=' in cookie:
-                        name, value = cookie.strip().split('=', 1)
-                        driver.add_cookie({'name': name, 'value': value})
-                driver.refresh()
-                time.sleep(3)
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+            from selenium.webdriver.common.by import By
+            from selenium.common.exceptions import TimeoutException
+
+            # ... 之前的代码（启动浏览器、访问URL）...
+
+            driver.get(url)
+
+            # 替换原来的 time.sleep(5) 为以下智能等待策略：
+            try:
+                # 策略1：等待页面基础结构加载完成（如 body 标签）
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+                print("✅ 页面基础结构加载完成")
+
+                # 策略2：等待一个更具体的、表明页面已准备就绪的元素出现。
+                # 例如，等待包含直播数据的脚本标签或特定的CSS类。这里需要根据实际页面调整。
+                # 下面是一个示例，您可以尝试搜索页面中更具代表性的标志：
+                # WebDriverWait(driver, 15).until(
+                #     EC.presence_of_element_located((By.CLASS_NAME, "ZGg-n1ZU"))
+                # )
+
+                # 策略3（关键）：等待 JavaScript 的 document.readyState 变为 'complete'
+                WebDriverWait(driver, 15).until(
+                    lambda driver: driver.execute_script("return document.readyState") == "complete"
+                )
+                print("✅ 页面JavaScript执行完毕，已准备就绪")
+
+            except TimeoutException:
+                print("⚠️ 页面加载超时，但继续执行后续步骤...")
+
+
+
             
             # 获取页面源码
             html_content = driver.page_source
+
+
+            # +++ 新增：诊断代码 +++
+            try:
+                with open("douyin_page_dump.html", "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                print("✅ 页面源码已保存至：douyin_page_dump.html")
+    
+                # 可选：同时检查页面标题和URL，辅助判断页面状态
+                print(f"   页面标题: {driver.title}")
+                print(f"   当前URL: {driver.current_url}")
+            except Exception as e:
+                print(f"⚠️ 保存调试文件时出错: {e}")
+            # +++ 诊断代码结束 +++
+
+
+
             
         finally:
             driver.quit()
 
-        # 从HTML中提取直播间ID
-        web_rid = url.split('?')[0].split('live.douyin.com/')[-1]
-        
-        # 原有的API调用逻辑改为从HTML解析
-        # 使用正则表达式从HTML中提取直播流数据
+        # ... （前面您已经获取到 html_content 的代码保持不变）
+
+        # ========== 以下是需要替换/新增的代码块 ==========
+        # 从HTML中提取直播流数据
         import re
         import json
+
+        stream_data = None
+        json_str_to_parse = None
+
+        # 模式1：尝试寻找包含"stream"和"origin"等关键字的大型JSON对象（这是最可能成功的方式）
+        pattern_large_json = r'<script id="RENDER_DATA" type="application/json">(.*?)</script>'
+        match = re.search(pattern_large_json, html_content, re.DOTALL)
+
+        if match:
+            json_str_to_parse = match.group(1)
+            print("✅ 模式1：找到 RENDER_DATA 脚本标签。")
+        else:
+            # 模式2：尝试搜索包含直播流URL的JSON片段
+            pattern_stream_json = r'\"origin\"\s*:\s*\{\s*\"main\"\s*:\s*\{[^}]+\"flv\"\s*:\s*\"([^\"]+)\"[^}]+\"hls\"\s*:\s*\"([^\"]+)\"'
+            match = re.search(pattern_stream_json, html_content)
+            if match:
+                flv_url = match.group(1).replace(r'\u0026', '&')
+                hls_url = match.group(2).replace(r'\u0026', '&')
+                # 手动构建一个结构化的stream_data
+                stream_data = {
+                    "origin": {
+                        "main": {
+                            "flv": flv_url,
+                            "hls": hls_url
+                        }
+                    }
+                }
+                print("✅ 模式2：直接提取FLV/HLS URL成功。")
+
+        if json_str_to_parse:
+            try:
+                # 处理转义字符
+                json_str_cleaned = json_str_to_parse.replace(r'\u0026', '&')
+                # 将JSON字符串解析为Python字典
+                page_data = json.loads(json_str_cleaned)
         
-        # 查找包含直播流信息的JSON数据
-        pattern = r'"stream_url"\s*:\s*(\{.*?\})\s*,\s*"'
-        match = re.search(pattern, html_content, re.DOTALL)
+                # 定义可能的路径来查找stream数据
+                possible_paths = [
+                    ['app', 'store', 'roomStore', 'roomInfo', 'room', 'stream_url', 'data', 'origin'],
+                    ['app', 'store', 'RoomStore', 'roomInfo', 'room', 'stream_url', 'data', 'origin'],
+                    ['store', 'roomStore', 'roomInfo', 'room', 'stream_url', 'data', 'origin'],
+                    ['stream']  # 直接根路径
+                ]
         
-        if not match:
-            raise Exception("无法从HTML中提取直播流数据")
-        
-        stream_data_str = match.group(1)
-        stream_data = json.loads(stream_data_str)
+                for path in possible_paths:
+                    current_data = page_data
+                    try:
+                        for key in path:
+                            current_data = current_data[key]
+                        stream_data = current_data
+                        print(f"✅ 通过路径 {path} 找到直播流数据。")
+                        break
+                    except (KeyError, TypeError):
+                        continue
+                
+            except json.JSONDecodeError as e:
+                print(f"❌ 解析RENDER_DATA JSON时出错: {e}")
+
+        # 最终检查
+        if not stream_data:
+            # 如果所有模式都失败，保存页面源码以供详细分析
+            with open("failed_page_dump.html", "w", encoding="utf-8") as f:
+                f.write(html_content)
+            raise Exception("所有提取模式均失败。页面源码已保存至 'failed_page_dump.html'，请检查页面结构或是否触发了反爬机制。")
+        else:
+            print("🎉 直播流数据提取成功！")
+
+
+# ========== 替换代码块结束 ==========
         
         # 构建返回数据（保持与原结构一致）
         room_data = {
