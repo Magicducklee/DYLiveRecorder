@@ -18,9 +18,9 @@ from operator import itemgetter
 import urllib.parse
 import urllib.request
 from .utils import trace_error_decorator
-from .spider import (
-    get_douyu_stream_data, get_bilibili_stream_data
-)
+#from .spider import (
+#    get_douyu_stream_data, get_bilibili_stream_data
+#)
 from .http_clients.async_http import get_response_status
 
 QUALITY_MAPPING = {"OD": 0, "BD": 0, "UHD": 1, "HD": 2, "SD": 3, "LD": 4}
