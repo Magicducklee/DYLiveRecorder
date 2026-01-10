@@ -1,5 +1,3 @@
-<img width="998" height="82" alt="image" src="https://github.com/user-attachments/assets/25e562f9-309a-437d-9c1c-81eb70c9e31d" /><img width="212" height="30" alt="image" src="https://github.com/user-attachments/assets/e17d9375-59a4-4068-871e-7a99165b9bbb" /><img width="561" height="30" alt="image" src="https://github.com/user-attachments/assets/13ab507b-c7d9-4b45-85af-88e41b17fe56" />![video_spider](https://socialify.git.ci/ihmily/DouyinLiveRecorder/image?font=Inter&forks=1&language=1&owner=1&pattern=Circuit%20Board&stargazers=1&theme=Light)
-
 ## 💡简介
 
 一款**简易**的可循环值守的直播录制工具，基于FFmpeg实现多平台直播源录制，支持自定义配置录制以及直播状态推送。
